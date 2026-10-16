@@ -8,7 +8,9 @@ import kotlinx.coroutines.flow.Flow
 
 class TodoRepository(
     private val todoDao: TodoDao,
-    private val goalDao: GoalDao
+    private val goalDao: GoalDao,
+    /** Called after every to-do change, e.g. to refresh the home-screen widget. */
+    private val onTodosChanged: suspend () -> Unit = {}
 ) {
     val allTodos: Flow<List<TodoEntity>> = todoDao.getAllTodos()
     val remainingTodosCount: Flow<Int> = todoDao.getRemainingCount()
@@ -16,16 +18,52 @@ class TodoRepository(
 
     suspend fun addTodo(text: String, timeStr: String = "") {
         if (text.isBlank()) return
-        val todo = TodoEntity(text = text.trim(), timeStr = timeStr.trim())
+        // New to-dos go to the top, as before reordering existed.
+        val todo = TodoEntity(
+            text = text.trim(),
+            timeStr = timeStr.trim(),
+            sortOrder = todoDao.minSortOrder() - 1
+        )
         todoDao.insertTodo(todo)
+        notifyTodosChanged()
     }
 
-    suspend fun toggleTodoCompleted(todo: TodoEntity) {
-        todoDao.updateTodo(todo.copy(isCompleted = !todo.isCompleted))
+    suspend fun toggleTodoCompleted(id: Long) {
+        todoDao.toggleCompleted(id)
+        notifyTodosChanged()
+    }
+
+    suspend fun updateTodoText(id: Long, text: String) {
+        if (text.isBlank()) return
+        todoDao.updateText(id, text.trim())
+        notifyTodosChanged()
     }
 
     suspend fun deleteTodo(todo: TodoEntity) {
         todoDao.deleteTodo(todo)
+        notifyTodosChanged()
+    }
+
+    /** Persists a drag-and-drop order; the widget picks it up via the shared query. */
+    suspend fun reorderTodos(idsInOrder: List<Long>) {
+        todoDao.updateSortOrders(idsInOrder)
+        notifyTodosChanged()
+    }
+
+    suspend fun deleteTodoById(id: Long) {
+        todoDao.deleteById(id)
+        notifyTodosChanged()
+    }
+
+    /** Re-inserts a deleted todo with its original id (used for undo). */
+    suspend fun restoreTodo(todo: TodoEntity) {
+        todoDao.insertTodo(todo)
+        notifyTodosChanged()
+    }
+
+    private suspend fun notifyTodosChanged() {
+        // A widget refresh failing must never break saving the to-do itself.
+        runCatching { onTodosChanged() }
     }
 
     suspend fun addGoal(title: String, description: String, progressPercentage: Int, iconType: String) {
@@ -43,11 +81,12 @@ class TodoRepository(
         goalDao.updateGoal(goal)
     }
 
-    suspend fun updateGoalProgress(goal: GoalEntity, newProgress: Int) {
-        goalDao.updateGoal(goal.copy(progressPercentage = newProgress.coerceIn(0, 100)))
-    }
-
     suspend fun deleteGoal(goal: GoalEntity) {
         goalDao.deleteGoal(goal)
+    }
+
+    /** Re-inserts a deleted goal with its original id (used for undo). */
+    suspend fun restoreGoal(goal: GoalEntity) {
+        goalDao.insertGoal(goal)
     }
 }

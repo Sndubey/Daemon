@@ -6,10 +6,13 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -25,7 +28,13 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -59,11 +68,27 @@ private val DangerColor = Color(0xFFE57373)
 fun NotesScreen(viewModel: NotesViewModel) {
     val notesList by viewModel.notes.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val showHidden by viewModel.showHidden.collectAsStateWithLifecycle()
     var showSearchField by rememberSaveable { mutableStateOf(searchQuery.isNotEmpty()) }
     val snackbarHostState = remember { SnackbarHostState() }
+    val haptics = LocalHapticFeedback.current
 
-    // Save drafts and close locked notes whenever the app leaves the foreground.
+    // Save drafts, close locked notes and leave the hidden view whenever the app leaves the foreground.
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onAppBackgrounded() }
+    // Switching to another tab also leaves the hidden view.
+    DisposableEffect(Unit) { onDispose { viewModel.exitHiddenMode() } }
+
+    val hiddenChange = viewModel.recentlyHiddenChange
+    LaunchedEffect(hiddenChange) {
+        if (hiddenChange == null) return@LaunchedEffect
+        val result = snackbarHostState.showSnackbar(
+            // Never mention how to reach hidden notes: anyone looking at the screen would learn it.
+            message = if (hiddenChange.nowHidden) "Note hidden" else "Note unhidden",
+            actionLabel = "Undo",
+            duration = SnackbarDuration.Short
+        )
+        if (result == SnackbarResult.ActionPerformed) viewModel.undoHiddenChange() else viewModel.clearRecentlyHiddenChange()
+    }
 
     val deleted = viewModel.recentlyDeleted
     LaunchedEffect(deleted) {
@@ -84,16 +109,18 @@ fun NotesScreen(viewModel: NotesViewModel) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 16.dp)
+                .padding(horizontal = 12.dp)
         ) {
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(20.dp))
 
             NotesHeader(
+                isHiddenMode = showHidden,
                 isSearchVisible = showSearchField,
                 onSearchClick = {
                     showSearchField = !showSearchField
                     if (!showSearchField) viewModel.onSearchQueryChanged("")
-                }
+                },
+                onExitHidden = viewModel::exitHiddenMode
             )
 
             AnimatedVisibility(visible = showSearchField) {
@@ -109,6 +136,7 @@ fun NotesScreen(viewModel: NotesViewModel) {
             if (notesList.isEmpty()) {
                 EmptyNotesState(
                     isSearching = searchQuery.isNotBlank(),
+                    isHiddenMode = showHidden,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
@@ -116,33 +144,68 @@ fun NotesScreen(viewModel: NotesViewModel) {
             } else {
                 LazyVerticalStaggeredGrid(
                     columns = StaggeredGridCells.Fixed(2),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalItemSpacing = 12.dp,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalItemSpacing = 10.dp,
                     contentPadding = PaddingValues(bottom = 96.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    items(notesList, key = { it.id }) { note ->
+                    // Pinned notes sit at the top under their own heading, like Keep.
+                    val (pinnedNotes, otherNotes) = notesList.partition { it.isPinned }
+                    val noteCard: @Composable (NoteEntity) -> Unit = { note ->
                         NoteCardItem(
                             note = note,
                             onClick = { viewModel.onNoteClick(note) },
+                            onTogglePin = { viewModel.onTogglePinClick(note) },
                             onToggleLock = { viewModel.onToggleLockClick(note) },
+                            onToggleHidden = { viewModel.onToggleHiddenClick(note) },
                             onDelete = { viewModel.onDeleteClick(note) }
                         )
                     }
+                    if (pinnedNotes.isNotEmpty()) {
+                        item(key = "header_pinned", span = StaggeredGridItemSpan.FullLine) {
+                            GridSectionLabel("Pinned")
+                        }
+                        items(pinnedNotes, key = { it.id }) { noteCard(it) }
+                        if (otherNotes.isNotEmpty()) {
+                            item(key = "header_others", span = StaggeredGridItemSpan.FullLine) {
+                                GridSectionLabel("Others", modifier = Modifier.padding(top = 8.dp))
+                            }
+                        }
+                    }
+                    items(otherNotes, key = { it.id }) { noteCard(it) }
                 }
             }
         }
 
-        FloatingActionButton(
-            onClick = viewModel::createNote,
-            containerColor = AccentColor,
-            contentColor = BackgroundColor,
-            shape = RoundedCornerShape(18.dp),
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(20.dp)
-        ) {
-            Icon(Icons.Default.Add, contentDescription = "New note")
+        // Tap: new note. Long-press: show/leave hidden notes (deliberately not labelled anywhere).
+        // The long-press must be held for HIDDEN_NOTES_HOLD_MILLIS, far longer than the system
+        // default, so it can't be triggered by accident; only this button gets the longer timeout.
+        val baseViewConfiguration = LocalViewConfiguration.current
+        val slowLongPressConfiguration = remember(baseViewConfiguration) {
+            object : ViewConfiguration by baseViewConfiguration {
+                override val longPressTimeoutMillis: Long = HIDDEN_NOTES_HOLD_MILLIS
+            }
+        }
+        CompositionLocalProvider(LocalViewConfiguration provides slowLongPressConfiguration) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(20.dp)
+                    .size(56.dp)
+                    .shadow(6.dp, RoundedCornerShape(18.dp))
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(AccentColor)
+                    .combinedClickable(
+                        onClick = viewModel::createNote,
+                        onLongClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            viewModel.toggleHiddenMode()
+                        }
+                    )
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "New note", tint = BackgroundColor)
+            }
         }
 
         SnackbarHost(
@@ -168,7 +231,9 @@ fun NotesScreen(viewModel: NotesViewModel) {
                 onTitleChange = viewModel::onTitleChange,
                 onContentChange = viewModel::onContentChange,
                 onCategoryChange = viewModel::onCategoryChange,
+                onTogglePin = viewModel::togglePinInEditor,
                 onToggleLock = viewModel::toggleLockInEditor,
+                onToggleHidden = viewModel::toggleHiddenInEditor,
                 onDelete = viewModel::deleteFromEditor,
                 onClose = viewModel::closeEditor
             )
@@ -187,25 +252,60 @@ fun NotesScreen(viewModel: NotesViewModel) {
 }
 
 @Composable
-private fun NotesHeader(isSearchVisible: Boolean, onSearchClick: () -> Unit) {
+private fun NotesHeader(
+    isHiddenMode: Boolean,
+    isSearchVisible: Boolean,
+    onSearchClick: () -> Unit,
+    onExitHidden: () -> Unit
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            Text(
-                text = "Notes",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                color = TextPrimaryColor
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isHiddenMode) {
+                    Icon(
+                        imageVector = Icons.Default.VisibilityOff,
+                        contentDescription = null,
+                        tint = AccentColor,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    text = if (isHiddenMode) "Hidden notes" else "Notes",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimaryColor
+                )
+            }
             Spacer(Modifier.height(4.dp))
             Text(
-                text = "Capture your thoughts, ideas and more",
+                text = if (isHiddenMode) "Only you know these are here" else "Capture your thoughts, ideas and more",
                 fontSize = 13.sp,
                 color = TextSecondaryColor
             )
+        }
+
+        if (isHiddenMode) {
+            Surface(
+                onClick = onExitHidden,
+                shape = CircleShape,
+                color = SurfaceColor,
+                modifier = Modifier.size(42.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.Visibility,
+                        contentDescription = "Back to notes",
+                        tint = TextPrimaryColor,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
         }
 
         Surface(
@@ -262,30 +362,54 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier
 }
 
 @Composable
-private fun EmptyNotesState(isSearching: Boolean, modifier: Modifier = Modifier) {
+private fun EmptyNotesState(isSearching: Boolean, isHiddenMode: Boolean, modifier: Modifier = Modifier) {
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(
-                imageVector = if (isSearching) Icons.Default.SearchOff else Icons.AutoMirrored.Filled.StickyNote2,
+                imageVector = when {
+                    isSearching -> Icons.Default.SearchOff
+                    isHiddenMode -> Icons.Default.VisibilityOff
+                    else -> Icons.AutoMirrored.Filled.StickyNote2
+                },
                 contentDescription = null,
                 tint = SurfaceVariantColor,
                 modifier = Modifier.size(64.dp)
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                text = if (isSearching) "No matching notes" else "No notes yet",
+                text = when {
+                    isSearching -> "No matching notes"
+                    isHiddenMode -> "No hidden notes"
+                    else -> "No notes yet"
+                },
                 color = TextPrimaryColor,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                text = if (isSearching) "Locked notes are only matched by title" else "Tap + to write your first note",
+                text = when {
+                    isSearching -> "Locked notes are only matched by title"
+                    isHiddenMode -> "Hide a note from its ⋮ menu, or tap + to write one here"
+                    else -> "Tap + to write your first note"
+                },
                 color = TextSecondaryColor,
                 fontSize = 13.sp
             )
         }
     }
+}
+
+@Composable
+private fun GridSectionLabel(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text.uppercase(),
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 1.sp,
+        color = TextSecondaryColor,
+        modifier = modifier.padding(start = 4.dp, bottom = 2.dp)
+    )
 }
 
 @Composable
@@ -304,48 +428,98 @@ private fun rememberEditedLabel(millis: Long): String {
 private fun NoteCardItem(
     note: NoteEntity,
     onClick: () -> Unit,
+    onTogglePin: () -> Unit,
     onToggleLock: () -> Unit,
+    onToggleHidden: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    val category = NoteCategory.from(note.categoryIcon)
-    val dateStr = rememberEditedLabel(note.updatedAtMillis)
+    val haptics = LocalHapticFeedback.current
+    val shape = RoundedCornerShape(14.dp)
 
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(18.dp),
-        color = SurfaceColor,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(Modifier.padding(start = 14.dp, top = 8.dp, end = 4.dp, bottom = 14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(text = category.emoji, fontSize = 15.sp)
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = note.title.ifBlank { "Untitled" },
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (note.title.isBlank()) TextSecondaryColor else TextPrimaryColor,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+    // Keep-style card: just the title and as much text as fits, no chrome.
+    // Tap opens the note; long-press shows Lock / Hide / Delete.
+    Box {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .background(SurfaceColor)
+                .border(1.dp, SurfaceVariantColor, shape)
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        showMenu = true
+                    },
+                    onLongClickLabel = "Note options"
                 )
-
-                Box {
-                    IconButton(onClick = { showMenu = true }, modifier = Modifier.size(36.dp)) {
+                .padding(horizontal = 16.dp, vertical = 14.dp)
+        ) {
+            val title = note.title.ifBlank { if (note.isLocked) "Locked note" else "" }
+            if (title.isNotEmpty()) {
+                Row(verticalAlignment = Alignment.Top) {
+                    Text(
+                        text = title,
+                        fontSize = 17.sp,
+                        lineHeight = 22.sp,
+                        letterSpacing = 0.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = TextPrimaryColor,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (note.isLocked) {
+                        Spacer(Modifier.width(8.dp))
                         Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "Note options",
-                            tint = TextSecondaryColor,
-                            modifier = Modifier.size(18.dp)
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "Locked",
+                            tint = AccentColor,
+                            modifier = Modifier
+                                .padding(top = 3.dp)
+                                .size(16.dp)
                         )
                     }
+                }
+            }
 
-                    DropdownMenu(
-                        expanded = showMenu,
-                        onDismissRequest = { showMenu = false },
-                        containerColor = SurfaceVariantColor
-                    ) {
+            if (note.isLocked) {
+                Spacer(Modifier.height(6.dp))
+                Text(text = "Tap to unlock", fontSize = 14.sp, letterSpacing = 0.1.sp, color = TextSecondaryColor)
+            } else if (note.content.isNotBlank()) {
+                if (title.isNotEmpty()) Spacer(Modifier.height(10.dp))
+                Text(
+                    text = note.content,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp,
+                    letterSpacing = 0.1.sp,
+                    color = TextPrimaryColor,
+                    maxLines = 10,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        DropdownMenu(
+            expanded = showMenu,
+            onDismissRequest = { showMenu = false },
+            containerColor = SurfaceVariantColor
+        ) {
+                        DropdownMenuItem(
+                            text = { Text(if (note.isPinned) "Unpin" else "Pin to top", color = TextPrimaryColor) },
+                            onClick = {
+                                showMenu = false
+                                onTogglePin()
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (note.isPinned) Icons.Outlined.PushPin else Icons.Default.PushPin,
+                                    contentDescription = null,
+                                    tint = AccentColor
+                                )
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text(if (note.isLocked) "Remove lock" else "Lock note", color = TextPrimaryColor) },
                             onClick = {
@@ -361,6 +535,20 @@ private fun NoteCardItem(
                             }
                         )
                         DropdownMenuItem(
+                            text = { Text(if (note.isHidden) "Unhide" else "Hide note", color = TextPrimaryColor) },
+                            onClick = {
+                                showMenu = false
+                                onToggleHidden()
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (note.isHidden) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                    contentDescription = null,
+                                    tint = AccentColor
+                                )
+                            }
+                        )
+                        DropdownMenuItem(
                             text = { Text("Delete", color = DangerColor) },
                             onClick = {
                                 showMenu = false
@@ -370,44 +558,6 @@ private fun NoteCardItem(
                                 Icon(Icons.Default.Delete, contentDescription = null, tint = DangerColor)
                             }
                         )
-                    }
-                }
-            }
-
-            Column(Modifier.padding(end = 10.dp)) {
-                Spacer(Modifier.height(6.dp))
-
-                if (note.isLocked) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(SurfaceVariantColor, RoundedCornerShape(12.dp))
-                            .padding(horizontal = 10.dp, vertical = 12.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Lock,
-                            contentDescription = null,
-                            tint = AccentColor,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(text = "Locked", fontSize = 13.sp, color = TextSecondaryColor)
-                    }
-                } else if (note.content.isNotBlank()) {
-                    Text(
-                        text = note.content,
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp,
-                        color = TextSecondaryColor,
-                        maxLines = 8,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                Spacer(Modifier.height(10.dp))
-                Text(text = dateStr, fontSize = 11.sp, color = HintColor)
-            }
         }
     }
 }
@@ -418,7 +568,9 @@ private fun NoteEditor(
     onTitleChange: (String) -> Unit,
     onContentChange: (String) -> Unit,
     onCategoryChange: (NoteCategory) -> Unit,
+    onTogglePin: () -> Unit,
     onToggleLock: () -> Unit,
+    onToggleHidden: () -> Unit,
     onDelete: () -> Unit,
     onClose: () -> Unit
 ) {
@@ -453,6 +605,22 @@ private fun NoteEditor(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Save and close", tint = TextPrimaryColor)
                     }
                     Spacer(Modifier.weight(1f))
+
+                    IconButton(onClick = onTogglePin) {
+                        Icon(
+                            imageVector = if (state.isPinned) Icons.Default.PushPin else Icons.Outlined.PushPin,
+                            contentDescription = if (state.isPinned) "Unpin note" else "Pin note",
+                            tint = if (state.isPinned) AccentColor else TextSecondaryColor
+                        )
+                    }
+
+                    IconButton(onClick = onToggleHidden) {
+                        Icon(
+                            imageVector = if (state.isHidden) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = if (state.isHidden) "Unhide note" else "Hide note",
+                            tint = if (state.isHidden) AccentColor else TextSecondaryColor
+                        )
+                    }
 
                     IconButton(onClick = onToggleLock) {
                         Icon(
@@ -690,3 +858,6 @@ private fun PasswordUnlockDialog(
 }
 
 private const val MAX_PASSWORD_LENGTH = 12
+
+/** How long "+" must be held to show or leave hidden notes. */
+private const val HIDDEN_NOTES_HOLD_MILLIS = 1_700L

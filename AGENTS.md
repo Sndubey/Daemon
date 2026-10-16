@@ -5,7 +5,7 @@ This document contains critical rules, architectural design patterns, security p
 ---
 
 ## 1. Core Principles & Privacy Guarantee
-* **Personal Use Only**: MyHub is built exclusively for personal productivity (To-Dos, Goals, and Notes).
+* **Personal Use Only**: MyHub is built exclusively for personal productivity (To-Dos, Goals, Notes, and Timetables).
 * **Offline-First & Sandbox Privacy**: The app has **NO INTERNET PERMISSION** declared in `AndroidManifest.xml`. Data must never leave the local device storage under any circumstance.
 
 ---
@@ -33,7 +33,8 @@ All UI screens **MUST** strictly adhere to the custom dark color system:
 
 ## 4. Data Persistence & Migration Rules
 * **Room Database**: All user data is persisted locally in Room SQLite database `myhub_main_database`.
-* **Zero Data Loss Rule**: User To-Dos, Goals, and Notes **MUST NOT** be wiped or lost when redeploying the app or adding new features.
+* **Zero Data Loss Rule**: User To-Dos, Goals, Notes, and Timetables **MUST NOT** be wiped or lost when redeploying the app or adding new features.
+* **Current schema version**: 6 (`MIGRATION_3_4` added the `timetables` and `timetable_entries` tables; `MIGRATION_4_5` added `todos.sortOrder` for drag-to-reorder; `MIGRATION_5_6` added `notes.isHidden`; `MIGRATION_6_7` added `notes.isPinned`). `exportSchema` is off, so verify new migration SQL against the generated `AppDatabase_Impl` `createAllTables` before shipping.
 * **Migration Policy**:
   - Do NOT call `.fallbackToDestructiveMigration()` in `AppDatabase.kt`.
   - When changing database schema in future updates, increment database `version` and provide explicit Room `Migration` paths to retain user content.
@@ -49,6 +50,11 @@ All UI screens **MUST** strictly adhere to the custom dark color system:
 2. **Screen 2: Notes (`Screen.Notes`)**:
    - Google Keep style staggered 2-column note cards.
    - Note locking feature backed by password `986727`.
-3. **Bottom Navigation**:
-   - Exactly 2 navigation items: **Todo** and **Notes**.
+   - Pinned notes are listed first under a "Pinned" heading (others under "Others"). Pin/unpin via card long-press menu or the editor's pin icon.
+   - Hidden notes: any note (locked or not) can be hidden. Hidden notes only appear after **holding the "+" button for 1.7 seconds** (`HIDDEN_NOTES_HOLD_MILLIS`). This gesture is a secret: **never mention it anywhere in the UI** (no hints, snackbars, empty states or tooltips). Opening a hidden locked note still requires the password. The hidden view closes when leaving the tab or the app.
+3. **Screen 3: Timetable (`Screen.Timetable`)**:
+   - Multiple named weekly timetables, all shown fully expanded in one scrolling list (no tap-to-open).
+   - Each timetable lists Sunday → Saturday: weekday name on the left, that day's tasks on the right; today's row is highlighted.
+4. **Bottom Navigation**:
+   - Exactly 3 navigation items: **Todo**, **Notes**, and **Timetable**.
    - Circular accent blue background pill (`#8AB4F8`) for the active tab icon.

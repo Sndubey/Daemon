@@ -7,6 +7,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.shubham.myhub.data.local.entity.NoteEntity
+import com.shubham.myhub.data.local.preferences.UnlockAttemptStore
 import com.shubham.myhub.data.repository.NoteRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
@@ -45,7 +47,9 @@ data class NoteEditorState(
     val content: String,
     val category: String,
     val isLocked: Boolean,
-    val updatedAtMillis: Long?
+    val updatedAtMillis: Long?,
+    val isHidden: Boolean = false,
+    val isPinned: Boolean = false
 )
 
 /** Actions that need the lock password before they run. */
@@ -68,16 +72,22 @@ data class AuthPrompt(
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class NotesViewModel(
-    private val repository: NoteRepository
+    private val repository: NoteRepository,
+    private val unlockAttempts: UnlockAttemptStore
 ) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    val notes: StateFlow<List<NoteEntity>> = _searchQuery
-        .debounce { if (it.isBlank()) 0L else 150L }
-        .distinctUntilChanged()
-        .flatMapLatest { query -> repository.observeNotePreviews(query) }
+    /** True while showing hidden notes (opened by long-pressing "+"). */
+    private val _showHidden = MutableStateFlow(false)
+    val showHidden: StateFlow<Boolean> = _showHidden.asStateFlow()
+
+    val notes: StateFlow<List<NoteEntity>> = combine(
+        _searchQuery.debounce { if (it.isBlank()) 0L else 150L }.distinctUntilChanged(),
+        _showHidden
+    ) { query, hidden -> query to hidden }
+        .flatMapLatest { (query, hidden) -> repository.observeNotePreviews(query, hidden) }
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
@@ -94,15 +104,56 @@ class NotesViewModel(
     var recentlyDeleted by mutableStateOf<NoteEntity?>(null)
         private set
 
+    /** Note just hidden or unhidden from the grid (it vanished from view), for the undo snackbar. */
+    var recentlyHiddenChange by mutableStateOf<HiddenChange?>(null)
+        private set
+
+    data class HiddenChange(val noteId: Long, val nowHidden: Boolean)
+
     // All writes go through this lock so a quick "toggle lock, then close" can't insert twice.
     private val writeMutex = Mutex()
     private val insertedIdsBySession = mutableMapOf<Long, Long>()
 
-    private var failedAttempts = 0
-    private var lockedOutUntil = 0L
-
     fun onSearchQueryChanged(query: String) {
         _searchQuery.value = query
+    }
+
+    // ---- Hidden notes ------------------------------------------------------------------
+
+    fun toggleHiddenMode() {
+        _showHidden.value = !_showHidden.value
+    }
+
+    /** Leaves the hidden view, e.g. when the user switches tab or the app goes to the background. */
+    fun exitHiddenMode() {
+        _showHidden.value = false
+    }
+
+    /** Hide/unhide from a grid card. No password needed: hiding never reveals content. */
+    fun onToggleHiddenClick(note: NoteEntity) {
+        setHidden(note.id, !note.isHidden)
+    }
+
+    private fun setHidden(id: Long, hidden: Boolean) {
+        viewModelScope.launch {
+            writeMutex.withLock { repository.setHidden(id, hidden) }
+            recentlyHiddenChange = HiddenChange(id, hidden)
+        }
+    }
+
+    /** Pin/unpin from a grid card. Doesn't change the note's "edited" time. */
+    fun onTogglePinClick(note: NoteEntity) {
+        viewModelScope.launch { writeMutex.withLock { repository.setPinned(note.id, !note.isPinned) } }
+    }
+
+    fun undoHiddenChange() {
+        val change = recentlyHiddenChange ?: return
+        recentlyHiddenChange = null
+        viewModelScope.launch { writeMutex.withLock { repository.setHidden(change.noteId, !change.nowHidden) } }
+    }
+
+    fun clearRecentlyHiddenChange() {
+        recentlyHiddenChange = null
     }
 
     // ---- Opening / creating -------------------------------------------------------------
@@ -115,7 +166,9 @@ class NotesViewModel(
             content = "",
             category = NoteCategory.IDEAS.name,
             isLocked = false,
-            updatedAtMillis = null
+            updatedAtMillis = null,
+            // A note created while viewing hidden notes is hidden too.
+            isHidden = _showHidden.value
         )
     }
 
@@ -137,7 +190,9 @@ class NotesViewModel(
                 content = note.content,
                 category = note.categoryIcon,
                 isLocked = note.isLocked,
-                updatedAtMillis = note.updatedAtMillis
+                updatedAtMillis = note.updatedAtMillis,
+                isHidden = note.isHidden,
+                isPinned = note.isPinned
             )
         }
     }
@@ -167,6 +222,20 @@ class NotesViewModel(
         viewModelScope.launch { persist(updated) }
     }
 
+    fun togglePinInEditor() {
+        val current = editor ?: return
+        val updated = current.copy(isPinned = !current.isPinned)
+        editor = updated
+        viewModelScope.launch { persist(updated) }
+    }
+
+    fun toggleHiddenInEditor() {
+        val current = editor ?: return
+        val updated = current.copy(isHidden = !current.isHidden)
+        editor = updated
+        viewModelScope.launch { persist(updated) }
+    }
+
     fun closeEditor() {
         val current = editor ?: return
         editor = null
@@ -187,6 +256,7 @@ class NotesViewModel(
      * note so its content isn't left on screen.
      */
     fun onAppBackgrounded() {
+        exitHiddenMode()
         val current = editor ?: return
         if (current.isLocked) editor = null
         viewModelScope.launch { persist(current) }
@@ -210,7 +280,9 @@ class NotesViewModel(
                         content = content,
                         categoryIcon = state.category,
                         isLocked = state.isLocked,
-                        updatedAtMillis = System.currentTimeMillis()
+                        updatedAtMillis = System.currentTimeMillis(),
+                        isHidden = state.isHidden,
+                        isPinned = state.isPinned
                     )
                 )
                 insertedIdsBySession[state.sessionKey] = newId
@@ -225,7 +297,13 @@ class NotesViewModel(
             val textChanged = existing.title != newTitle ||
                 existing.content != newContent ||
                 existing.categoryIcon != state.category
-            if (!textChanged && existing.isLocked == state.isLocked) return@withLock
+            if (!textChanged &&
+                existing.isLocked == state.isLocked &&
+                existing.isHidden == state.isHidden &&
+                existing.isPinned == state.isPinned
+            ) {
+                return@withLock
+            }
 
             repository.updateNote(
                 existing.copy(
@@ -233,6 +311,8 @@ class NotesViewModel(
                     content = newContent,
                     categoryIcon = state.category,
                     isLocked = state.isLocked,
+                    isHidden = state.isHidden,
+                    isPinned = state.isPinned,
                     updatedAtMillis = if (textChanged) System.currentTimeMillis() else existing.updatedAtMillis
                 )
             )
@@ -287,14 +367,14 @@ class NotesViewModel(
 
     fun submitPassword(input: String) {
         val prompt = authPrompt ?: return
-        val now = SystemClock.elapsedRealtime()
-        if (now < lockedOutUntil) {
-            authPrompt = prompt.copy(lockedOutUntil = lockedOutUntil)
+        val lockout = activeLockout()
+        if (lockout != 0L) {
+            authPrompt = prompt.copy(lockedOutUntil = lockout)
             return
         }
 
         if (repository.verifyPassword(input)) {
-            failedAttempts = 0
+            unlockAttempts.reset()
             authPrompt = null
             when (val action = prompt.action) {
                 is ProtectedAction.Open -> openNote(action.noteId)
@@ -306,12 +386,20 @@ class NotesViewModel(
             return
         }
 
-        failedAttempts++
+        // Saved to disk before reacting, so leaving or killing the app can't undo the attempt.
+        val failedAttempts = unlockAttempts.failedAttempts + 1
         val attemptsLeft = MAX_ATTEMPTS - (failedAttempts % MAX_ATTEMPTS)
-        val message = if (attemptsLeft == MAX_ATTEMPTS) {
-            // Every MAX_ATTEMPTS failures, refuse input for a doubling period of time.
+        val isLockoutRound = attemptsLeft == MAX_ATTEMPTS
+        // Every MAX_ATTEMPTS failures, refuse input for a doubling period of time (capped at 32 min).
+        val lockoutMillis = if (isLockoutRound) {
             val round = failedAttempts / MAX_ATTEMPTS
-            lockedOutUntil = now + BASE_LOCKOUT_MS * (1L shl (round - 1).coerceAtMost(6))
+            BASE_LOCKOUT_MS * (1L shl (round - 1).coerceAtMost(6))
+        } else {
+            0L
+        }
+        unlockAttempts.recordFailure(failedAttempts, lockoutMillis)
+
+        val message = if (isLockoutRound) {
             "Too many wrong attempts."
         } else {
             "Wrong password. $attemptsLeft attempt${if (attemptsLeft == 1) "" else "s"} left."
@@ -323,8 +411,7 @@ class NotesViewModel(
         )
     }
 
-    private fun activeLockout(): Long =
-        if (SystemClock.elapsedRealtime() < lockedOutUntil) lockedOutUntil else 0L
+    private fun activeLockout(): Long = unlockAttempts.activeLockoutUntil()
 
     private companion object {
         const val MAX_ATTEMPTS = 5

@@ -22,6 +22,9 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            // Personal-use app: sign release with the local debug key so it installs as an
+            // update over debug builds (same signature = data is kept) and runs at full speed.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -63,6 +66,12 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.work.runtime.ktx)
+
+    // Home-screen To-Do widget
+    implementation(libs.androidx.glance.appwidget)
+
+    // Drag-to-reorder to-dos
+    implementation(libs.reorderable)
 
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

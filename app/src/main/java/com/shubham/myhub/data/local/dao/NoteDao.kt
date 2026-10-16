@@ -26,29 +26,37 @@ interface NoteDao {
 
     // List queries never expose the content of locked notes: it is blanked out in SQL,
     // so it is never held in UI state and cannot be matched by search.
+    // [hidden] picks either the normal notes or only the hidden ones, never both.
     @Query(
         """
         SELECT id, title, CASE WHEN isLocked = 1 THEN '' ELSE content END AS content,
-               categoryIcon, isLocked, updatedAtMillis
-        FROM notes ORDER BY updatedAtMillis DESC
+               categoryIcon, isLocked, updatedAtMillis, isHidden, isPinned
+        FROM notes WHERE isHidden = :hidden ORDER BY isPinned DESC, updatedAtMillis DESC
         """
     )
-    fun getNotePreviews(): Flow<List<NoteEntity>>
+    fun getNotePreviews(hidden: Boolean): Flow<List<NoteEntity>>
 
     @Query(
         """
         SELECT id, title, CASE WHEN isLocked = 1 THEN '' ELSE content END AS content,
-               categoryIcon, isLocked, updatedAtMillis
+               categoryIcon, isLocked, updatedAtMillis, isHidden, isPinned
         FROM notes
-        WHERE title LIKE '%' || :query || '%'
-           OR (isLocked = 0 AND content LIKE '%' || :query || '%')
-        ORDER BY updatedAtMillis DESC
+        WHERE isHidden = :hidden
+          AND (title LIKE '%' || :query || '%'
+               OR (isLocked = 0 AND content LIKE '%' || :query || '%'))
+        ORDER BY isPinned DESC, updatedAtMillis DESC
         """
     )
-    fun searchNotePreviews(query: String): Flow<List<NoteEntity>>
+    fun searchNotePreviews(query: String, hidden: Boolean): Flow<List<NoteEntity>>
 
     @Query("UPDATE notes SET isLocked = :isLocked WHERE id = :id")
     suspend fun updateLockStatus(id: Long, isLocked: Boolean): Int
+
+    @Query("UPDATE notes SET isHidden = :isHidden WHERE id = :id")
+    suspend fun updateHidden(id: Long, isHidden: Boolean): Int
+
+    @Query("UPDATE notes SET isPinned = :isPinned WHERE id = :id")
+    suspend fun updatePinned(id: Long, isPinned: Boolean): Int
 
     @Query("DELETE FROM notes WHERE id = :id")
     suspend fun deleteById(id: Long): Int

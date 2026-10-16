@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.shubham.myhub.ui.navigation.AppNavigation
 import com.shubham.myhub.ui.notes.NotesViewModel
 import com.shubham.myhub.ui.theme.MyHubTheme
+import com.shubham.myhub.ui.timetable.TimetableViewModel
 import com.shubham.myhub.ui.todo.TodoViewModel
 
 class MainActivity : ComponentActivity() {
@@ -21,7 +22,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private val notesViewModel: NotesViewModel by viewModels {
-        ViewModelFactory { NotesViewModel(app.noteRepository) }
+        ViewModelFactory { NotesViewModel(app.noteRepository, app.unlockAttemptStore) }
+    }
+
+    private val timetableViewModel: TimetableViewModel by viewModels {
+        ViewModelFactory { TimetableViewModel(app.timetableRepository) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -32,7 +37,8 @@ class MainActivity : ComponentActivity() {
             MyHubTheme {
                 AppNavigation(
                     todoViewModel = todoViewModel,
-                    notesViewModel = notesViewModel
+                    notesViewModel = notesViewModel,
+                    timetableViewModel = timetableViewModel
                 )
             }
         }

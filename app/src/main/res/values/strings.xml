@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">DAEMON</string>
+    <string name="todo_widget_label">To Do</string>
+    <string name="todo_widget_description">Your to-do list. Tick items off and add new ones from the home screen.</string>
 </resources>

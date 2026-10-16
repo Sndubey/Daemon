@@ -1,5 +1,8 @@
 package com.shubham.myhub.ui.todo
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.shubham.myhub.data.local.entity.GoalEntity
@@ -10,6 +13,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.Calendar
+
+/** Something the user just deleted and can still undo. */
+sealed interface DeletedItem {
+    data class Todo(val todo: TodoEntity) : DeletedItem
+    data class Goal(val goal: GoalEntity) : DeletedItem
+}
 
 class TodoViewModel(
     private val repository: TodoRepository
@@ -24,6 +33,9 @@ class TodoViewModel(
     val goals: StateFlow<List<GoalEntity>> = repository.allGoals
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    var recentlyDeleted by mutableStateOf<DeletedItem?>(null)
+        private set
+
     fun getGreeting(): String {
         val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
         return when (hour) {
@@ -33,21 +45,37 @@ class TodoViewModel(
         }
     }
 
-    fun addTodo(text: String, timeStr: String) {
+    fun isDaytime(): Boolean = Calendar.getInstance().get(Calendar.HOUR_OF_DAY) in 6..17
+
+    fun addTodo(text: String) {
         viewModelScope.launch {
-            repository.addTodo(text, timeStr)
+            repository.addTodo(text)
         }
     }
 
     fun toggleTodo(todo: TodoEntity) {
         viewModelScope.launch {
-            repository.toggleTodoCompleted(todo)
+            repository.toggleTodoCompleted(todo.id)
+        }
+    }
+
+    fun updateTodoText(todo: TodoEntity, newText: String) {
+        if (newText.trim() == todo.text) return
+        viewModelScope.launch {
+            repository.updateTodoText(todo.id, newText)
+        }
+    }
+
+    fun reorderTodos(idsInOrder: List<Long>) {
+        viewModelScope.launch {
+            repository.reorderTodos(idsInOrder)
         }
     }
 
     fun deleteTodo(todo: TodoEntity) {
         viewModelScope.launch {
             repository.deleteTodo(todo)
+            recentlyDeleted = DeletedItem.Todo(todo)
         }
     }
 
@@ -57,13 +85,15 @@ class TodoViewModel(
         }
     }
 
-    fun updateGoal(goal: GoalEntity, newTitle: String, newDesc: String, newProgress: Int) {
+    fun updateGoal(goal: GoalEntity, newTitle: String, newDesc: String, newProgress: Int, newIconType: String) {
+        val updated = goal.copy(
+            title = newTitle.trim(),
+            description = newDesc.trim(),
+            progressPercentage = newProgress.coerceIn(0, 100),
+            iconType = newIconType
+        )
+        if (updated == goal || updated.title.isBlank()) return
         viewModelScope.launch {
-            val updated = goal.copy(
-                title = newTitle.trim(),
-                description = newDesc.trim(),
-                progressPercentage = newProgress.coerceIn(0, 100)
-            )
             repository.updateGoal(updated)
         }
     }
@@ -71,6 +101,22 @@ class TodoViewModel(
     fun deleteGoal(goal: GoalEntity) {
         viewModelScope.launch {
             repository.deleteGoal(goal)
+            recentlyDeleted = DeletedItem.Goal(goal)
         }
+    }
+
+    fun undoDelete() {
+        val item = recentlyDeleted ?: return
+        recentlyDeleted = null
+        viewModelScope.launch {
+            when (item) {
+                is DeletedItem.Todo -> repository.restoreTodo(item.todo)
+                is DeletedItem.Goal -> repository.restoreGoal(item.goal)
+            }
+        }
+    }
+
+    fun clearRecentlyDeleted() {
+        recentlyDeleted = null
     }
 }

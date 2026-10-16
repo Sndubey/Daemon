@@ -8,14 +8,25 @@ import java.security.MessageDigest
 class NoteRepository(
     private val noteDao: NoteDao
 ) {
-    /** Notes for the grid. Locked notes come back with empty content. */
-    fun observeNotePreviews(query: String): Flow<List<NoteEntity>> {
+    /**
+     * Notes for the grid: the normal ones, or only hidden ones when [hidden] is true.
+     * Locked notes come back with empty content.
+     */
+    fun observeNotePreviews(query: String, hidden: Boolean): Flow<List<NoteEntity>> {
         val trimmed = query.trim()
         return if (trimmed.isEmpty()) {
-            noteDao.getNotePreviews()
+            noteDao.getNotePreviews(hidden)
         } else {
-            noteDao.searchNotePreviews(trimmed)
+            noteDao.searchNotePreviews(trimmed, hidden)
         }
+    }
+
+    suspend fun setHidden(id: Long, hidden: Boolean) {
+        noteDao.updateHidden(id, hidden)
+    }
+
+    suspend fun setPinned(id: Long, pinned: Boolean) {
+        noteDao.updatePinned(id, pinned)
     }
 
     /** Full note including content. Only call after the user is allowed to see it. */

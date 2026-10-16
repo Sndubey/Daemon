@@ -22,18 +22,22 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.shubham.myhub.ui.notes.NotesScreen
 import com.shubham.myhub.ui.notes.NotesViewModel
+import com.shubham.myhub.ui.timetable.TimetableScreen
+import com.shubham.myhub.ui.timetable.TimetableViewModel
 import com.shubham.myhub.ui.todo.TodoScreen
 import com.shubham.myhub.ui.todo.TodoViewModel
 
 @Composable
 fun AppNavigation(
     todoViewModel: TodoViewModel,
-    notesViewModel: NotesViewModel
+    notesViewModel: NotesViewModel,
+    timetableViewModel: TimetableViewModel
 ) {
     val navController = rememberNavController()
     val screens = listOf(
         Screen.Todo,
-        Screen.Notes
+        Screen.Notes,
+        Screen.Timetable
     )
 
     Scaffold(
@@ -46,7 +50,7 @@ fun AppNavigation(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 12.dp, horizontal = 32.dp),
+                        .padding(vertical = 12.dp, horizontal = 16.dp),
                     horizontalArrangement = Arrangement.SpaceAround,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -110,6 +114,9 @@ fun AppNavigation(
             }
             composable(Screen.Notes.route) {
                 NotesScreen(viewModel = notesViewModel)
+            }
+            composable(Screen.Timetable.route) {
+                TimetableScreen(viewModel = timetableViewModel)
             }
         }
     }
